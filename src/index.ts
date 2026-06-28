@@ -25,8 +25,8 @@ export { buildHyperbasePacket, incidentPropositions, makeProposition } from "./h
 export { explainDecisions } from "./explain.js";
 export { defaultIncident, executeAction, redact, type Incident } from "./execute.js";
 
-// Truth-value kernels
-export { deduce, revise, slOpinion, nalExpectation, evidenceToOpinion } from "./truth.js";
+// Engine helpers (the typed @metta-ts driver pieces)
+export { mettaDB, mmin, mabs, flt, num } from "./engine.js";
 
 // OmegaClaw skill surface
 export * as skill from "./skill.js";

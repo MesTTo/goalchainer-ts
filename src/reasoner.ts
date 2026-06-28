@@ -6,9 +6,10 @@
 // action is believed acceptable (PLN). Both run on @metta-ts. The rows here are
 // what the DecisionEngine projects each action onto.
 
+import { add, mul, sub } from "@metta-ts/edsl";
 import { deriveDeontic, ACTION_ORDER } from "./deontic.js";
 import { gradeBeliefs, type Belief } from "./pln.js";
-import { nalExpectation, slOpinion } from "./truth.js";
+import { mettaDB, num, type MettaDB } from "./engine.js";
 import { round6, roundN, type CandidateAction, type EvidenceProjection } from "./models.js";
 import { evidenceToDict, type IncidentEvidence } from "./evidence.js";
 
@@ -28,25 +29,36 @@ export interface ActionEvidenceRow {
 const round4 = (x: number): number => roundN(x, 4);
 const fixed4 = (x: number): string => x.toFixed(4);
 
-function slOpinionRounded(f: number, c: number): { b: number; d: number; u: number; a: number } {
-  const o = slOpinion(f, c);
-  return { b: round4(o.b), d: round4(o.d), u: round4(o.u), a: 0.5 };
+// The NAL expectation conf*(strength-0.5)+0.5 and the Subjective-Logic opinion
+// (b=cf, d=c(1-f), u=1-c) are computed on the engine.
+function nalExpectation(db: MettaDB, f: number, c: number): number {
+  return num(db, add(mul(c, sub(f, 0.5)), 0.5));
+}
+
+function slOpinionRounded(db: MettaDB, f: number, c: number): { b: number; d: number; u: number; a: number } {
+  return {
+    b: round4(num(db, mul(c, f))),
+    d: round4(num(db, mul(c, sub(1, f)))),
+    u: round4(num(db, sub(1, c))),
+    a: 0.5,
+  };
 }
 
 function actionRows(
   statusByAction: Record<string, string>,
   beliefs: Record<string, Belief>,
 ): ActionEvidenceRow[] {
+  const db = mettaDB();
   return ACTION_ORDER.map((actionId) => {
     const status = statusByAction[actionId] ?? "unregulated";
     const belief = beliefs[actionId]!;
     return {
       action_id: actionId,
       deontic: status,
-      expectation: round6(nalExpectation(belief.strength, belief.confidence)),
+      expectation: round6(nalExpectation(db, belief.strength, belief.confidence)),
       strength: round6(belief.strength),
       confidence: round6(belief.confidence),
-      opinion: slOpinionRounded(belief.strength, belief.confidence),
+      opinion: slOpinionRounded(db, belief.strength, belief.confidence),
       projection: `(Acceptable ${actionId}) (STV ${fixed4(belief.strength)} ${fixed4(belief.confidence)})`,
       proofs: [
         `deontic: lib_deontic derived ${status} for ${actionId}`,

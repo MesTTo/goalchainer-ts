@@ -6,7 +6,8 @@ import { extractEvidence } from "../src/evidence.js";
 import { deriveDeontic } from "../src/deontic.js";
 import { gradeBeliefs } from "../src/pln.js";
 import { deriveIncident } from "../src/snars.js";
-import { deduce, revise } from "../src/truth.js";
+import { mettaDB, mmin } from "../src/engine.js";
+import { add, sub, mul, div } from "@metta-ts/edsl";
 import { defaultIncident, executeAction, redact } from "../src/execute.js";
 
 const PII =
@@ -43,17 +44,27 @@ describe("PLN engine on @metta-ts", () => {
   });
 });
 
-describe("truth-value kernels", () => {
-  it("deduction matches the single-rule cases", () => {
-    expect(deduce(0.85, 0.92, 0.85, 0.92)).toEqual([0.7525, 0.812]);
-    const [s, c] = deduce(0.05, 0.9, 0.98, 0.95);
-    expect(s).toBeCloseTo(0.053, 12);
-    expect(c).toBeCloseTo(0.886, 12);
+describe("truth-value kernels on the @metta-ts engine", () => {
+  const db = mettaDB();
+  const num = (t: ReturnType<typeof add>): number => db.evalJs(t)[0] as number;
+  const dedS = (rs: number, fs: number) => add(mul(rs, fs), mul(0.2, sub(1, fs)));
+  const dedC = (rc: number, fc: number, fs: number) =>
+    add(mul(fs, mmin(rc, fc)), mul(sub(1, fs), mmin(0.2, fc)));
+  const c2w = (c: number) => div(mul(c, 800), sub(1, mmin(c, 0.9999)));
+  const revS = (s1: number, c1: number, s2: number, c2: number) =>
+    div(add(mul(s1, c2w(c1)), mul(s2, c2w(c2))), add(c2w(c1), c2w(c2)));
+  const revC = (c1: number, c2: number) =>
+    div(add(c2w(c1), c2w(c2)), add(add(c2w(c1), c2w(c2)), 800));
+
+  it("deduction computed on the engine matches the single-rule cases", () => {
+    expect(num(dedS(0.85, 0.85))).toBe(0.7525);
+    expect(num(dedC(0.92, 0.92, 0.85))).toBe(0.812);
+    expect(num(dedS(0.05, 0.98))).toBeCloseTo(0.053, 12);
+    expect(num(dedC(0.9, 0.95, 0.98))).toBeCloseTo(0.886, 12);
   });
-  it("revision matches the count-space K=800 merge", () => {
-    const [s, c] = revise([0.95, 0.97], [0.884, 0.9125]);
-    expect(s).toBe(0.9339042316258351);
-    expect(c).toBe(0.9771490750816104);
+  it("revision computed on the engine matches the count-space K=800 merge", () => {
+    expect(num(revS(0.95, 0.97, 0.884, 0.9125))).toBe(0.9339042316258351);
+    expect(num(revC(0.97, 0.9125))).toBe(0.9771490750816104);
   });
 });
 

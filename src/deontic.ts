@@ -1,15 +1,14 @@
 // Derive each action's deontic status with a defeasible-deontic micro-engine on
-// @metta-ts. Ports goal_chainer/deontic_engine.py.
+// @metta-ts, driven through the typed eDSL. Ports goal_chainer/deontic_engine.py.
 //
-// The original ran OmegaClaw-Core's lib_deontic on PeTTa, whose platform layer
-// registers SWI-Prolog kernels (grounding.pl, reason.pl, deontic.pl) -- so it
-// cannot run on a pure-TS runtime. Here the same theory GoalChainer generates
-// (given facts; defeasible `normally` rules with must/may/forbidden heads) is run
-// through a small defeasible engine written in MeTTa: a `normally` rule fires its
-// deontic head when its body is a `given` fact. The F>O>P dominance fold (which
-// the Python did in `_parse_status`) stays in TypeScript.
+// The request's evidence becomes a theory of `given` facts and defeasible
+// `normally` rules (must / may / forbidden heads), built as typed atoms and added
+// to the engine. A `normally` rule fires its deontic head when its body is a
+// `given` fact; the firing runs as `match` on the interpreter and returns typed
+// rows. The F>O>P dominance fold stays in TypeScript (it is selection, not math).
 
-import { runMettaLines } from "./runtime.js";
+import { type Term, type Atom, rel, S, v, matchSelf } from "@metta-ts/edsl";
+import { mettaDB } from "./engine.js";
 import type { IncidentEvidence } from "./evidence.js";
 import { privacyAtStake } from "./evidence.js";
 
@@ -19,7 +18,7 @@ export const ACTION_ORDER = [
   "hold_external_update",
 ] as const;
 
-const MODE_TO_STATUS: Record<string, string> = { F: "forbidden", O: "obligated", P: "permitted" };
+const MODE_TO_STATUS: Record<string, string> = { forbidden: "forbidden", must: "obligated", may: "permitted" };
 const STATUS_RANK: Record<string, number> = {
   forbidden: 3,
   obligated: 2,
@@ -37,68 +36,58 @@ export function deonticStatus(result: DeonticResult, actionId: string): string {
   return result.statusByAction[actionId] ?? "unregulated";
 }
 
-// The fixed defeasible engine: fire every `normally` rule whose body is `given`,
-// and collect any directly-given deontic literal. Output is the set of deontic
-// literals (MODE action) that hold.
-const DEONTIC_ENGINE = `
-(= (deon-lit) (match &self (normally $n $b $h) (match &self (given $b) $h)))
-(= (deon-lit) (match &self (given (forbidden $a)) (forbidden $a)))
-(= (deon-lit) (match &self (given (may $a)) (may $a)))
-(= (deon-lit) (match &self (given (must $a)) (must $a)))
-!(collapse (deon-lit))
-`;
+const given = (x: Term): Atom => rel("given")(x);
+const normally = (name: string, body: Term, head: Term): Atom => rel("normally")(S(name), body, head);
 
-/** Project the evidence into a pure-MeTTa defeasible-deontic theory. */
-export function buildTheory(evidence: IncidentEvidence): string {
-  const lines: string[] = [];
-  const privacy = privacyAtStake(evidence);
-  // publish_raw_log: forbidden when identifiable data is at stake, else permitted.
-  if (privacy) {
-    lines.push(
-      "(given (risky publish_raw_log))",
-      "(normally rRawForbid (risky publish_raw_log) (forbidden publish_raw_log))",
-    );
+/** Project the evidence into the defeasible-deontic theory as typed atoms. */
+export function theoryAtoms(evidence: IncidentEvidence): Atom[] {
+  const a = S.publish_raw_log;
+  const r = S.publish_redacted_summary;
+  const h = S.hold_external_update;
+  const atoms: Atom[] = [];
+  if (privacyAtStake(evidence)) {
+    atoms.push(given(rel("risky")(a)), normally("rRawForbid", rel("risky")(a), rel("forbidden")(a)));
   } else {
-    lines.push(
-      "(given (safe publish_raw_log))",
-      "(normally rRawPermit (safe publish_raw_log) (may publish_raw_log))",
-    );
+    atoms.push(given(rel("safe")(a)), normally("rRawPermit", rel("safe")(a), rel("may")(a)));
   }
-  // publish_redacted_summary: obliged when facts are ready, otherwise permitted.
-  lines.push("(given (protects publish_redacted_summary))");
+  atoms.push(given(rel("protects")(r)));
   if (evidence.factsReady) {
-    lines.push(
-      "(normally rRedOblige (protects publish_redacted_summary) (must publish_redacted_summary))",
-    );
+    atoms.push(normally("rRedOblige", rel("protects")(r), rel("must")(r)));
   } else {
-    lines.push(
-      "(normally rRedPermit (protects publish_redacted_summary) (may publish_redacted_summary))",
-    );
+    atoms.push(normally("rRedPermit", rel("protects")(r), rel("may")(r)));
   }
-  // hold_external_update: obliged while facts are not ready, otherwise permitted.
   if (!evidence.factsReady) {
-    lines.push(
-      "(given (factsUnready))",
-      "(normally rHoldOblige (factsUnready) (must hold_external_update))",
-    );
+    atoms.push(given(rel("factsUnready")()), normally("rHoldOblige", rel("factsUnready")(), rel("must")(h)));
   } else {
-    lines.push("(given (may hold_external_update))");
+    atoms.push(given(rel("may")(h)));
   }
-  return lines.join("\n") + "\n";
+  return atoms;
 }
 
-const LITERAL_RE = /\((forbidden|may|must)\s+([a-z_]+)\)/g;
-const MODE_LETTER: Record<string, string> = { forbidden: "F", must: "O", may: "P" };
+/** The theory's MeTTa source, for the report (one atom per line). */
+export function buildTheory(evidence: IncidentEvidence): string {
+  return theoryAtoms(evidence).map((atom) => String(atom)).join("\n") + "\n";
+}
 
 export function deriveDeontic(evidence: IncidentEvidence): DeonticResult {
-  const theory = buildTheory(evidence);
-  const lines = runMettaLines(theory + DEONTIC_ENGINE);
-  // The engine emits one collapsed group: a tuple of deontic literals.
-  const conclusions = lines.reduce((a, b) => (b.length > a.length ? b : a), "");
+  const db = mettaDB();
+  const atoms = theoryAtoms(evidence);
+  db.add(...atoms);
+
+  // A normally-rule fires its head when its body is a given fact; directly-given
+  // deontic literals hold as themselves. Each clause adds a way to derive deon-lit.
+  db.rule(rel("deon-lit")(), matchSelf(rel("normally")(v("n"), v("b"), v("h")), matchSelf(rel("given")(v("b")), v("h"))));
+  for (const mode of ["forbidden", "may", "must"]) {
+    db.rule(rel("deon-lit")(), matchSelf(rel("given")(rel(mode)(v("a"))), rel(mode)(v("a"))));
+  }
+  const lits = db.evalJs(rel("deon-lit")()) as string[][];
+
   const statusByAction: Record<string, string> = {};
-  for (const match of conclusions.matchAll(LITERAL_RE)) {
-    const action = match[2]!;
-    const candidate = MODE_TO_STATUS[MODE_LETTER[match[1]!]!]!;
+  for (const lit of lits) {
+    const [mode, action] = lit;
+    if (mode === undefined || action === undefined) continue;
+    const candidate = MODE_TO_STATUS[mode];
+    if (candidate === undefined) continue;
     if ((STATUS_RANK[candidate] ?? 0) > (STATUS_RANK[statusByAction[action] ?? "unregulated"] ?? 0)) {
       statusByAction[action] = candidate;
     }
@@ -106,5 +95,6 @@ export function deriveDeontic(evidence: IncidentEvidence): DeonticResult {
   for (const actionId of ACTION_ORDER) {
     if (!(actionId in statusByAction)) statusByAction[actionId] = "unregulated";
   }
-  return { statusByAction, theory, conclusions };
+  const conclusions = "(" + lits.map(([m, ac]) => `(${m} ${ac})`).join(" ") + ")";
+  return { statusByAction, theory: buildTheory(evidence), conclusions };
 }

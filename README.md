@@ -91,14 +91,17 @@ and MetaMo. Three of those are bound to PeTTa's host: `lib_deontic`'s engine is 
 set of SWI-Prolog kernels registered as MeTTa functions, and MetaMo imports a
 Python helper. None of that runs on a pure-TypeScript runtime.
 
-So each engine is reimplemented natively for `@metta-ts`. The symbolic reasoning
-(matching facts to rules, firing defeasible rules, chaining deductions, folding the
-deontic dominance, computing the consensus) runs as MeTTa programs on the
-interpreter; the float arithmetic (the PLN truth formulas, the subjective-logic
-mapping, the consensus and score) runs as small TypeScript grounded operations the
-MeTTa programs call by name. That mirrors the original architecture, where the
-PeTTa MeTTa called registered Prolog kernels for the same arithmetic, with the
-kernels rewritten in TypeScript and run in-process.
+So each engine is reimplemented natively for `@metta-ts`, driven through the typed
+`@metta-ts/edsl` API. There are no MeTTa source strings and no output parsing: the
+engines build atoms with `rel`/`S`/`v`, add them to the space, fire rules with
+`match`, and read typed results back. The reasoning runs on the interpreter, and so
+does the arithmetic: the PLN truth formulas (deduction, count-space K=800 revision),
+the subjective-logic mapping, the MetaMo consensus, the NAL expectation, and the
+combined score are all built as engine arithmetic (`add`/`sub`/`mul`/`div`, with
+`min` as a branch) and evaluated by `@metta-ts`, not computed in TypeScript. The
+deontic dominance fold and the argmax selections stay in TypeScript because they are
+control flow, not math. There is no fallback path: the score runs on the engine in
+both modes, and the COLORE context reads its vendored data directly.
 
 The result is checked against the original. `fixtures/py-*.json` are the real
 outputs of the Python GoalChainer, and `tests/differential.test.ts` asserts this

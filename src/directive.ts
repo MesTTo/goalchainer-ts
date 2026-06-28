@@ -7,31 +7,29 @@
 // original drove OmegaClaw-Core lib_directive, whose engine is a SWI-Prolog kernel
 // that does not run on a pure-TS runtime.
 
-import { runMettaLines } from "./runtime.js";
+import { rel, S } from "@metta-ts/edsl";
+import { mettaDB } from "./engine.js";
 import { deriveDeontic, ACTION_ORDER } from "./deontic.js";
 import { extractEvidence } from "./evidence.js";
 
 const AGENT = "responder";
 
-// gc_directive.pl, as a relation on @metta-ts.
-const TASK_STATE_RELATION = `
-(= (gc-task-state forbidden) blocked)
-(= (gc-task-state obligated) ready)
-(= (gc-task-state permitted) backlog)
-(= (gc-task-state unregulated) backlog)
-`;
-
 const TASK_STATES = new Set(["ready", "blocked", "backlog"]);
 
+// gc_directive.pl, as a relation on @metta-ts: (gc-task-state obligated) -> ready.
 function classifyTaskStates(deonticByAction: Record<string, string>): {
   states: Record<string, string>;
   output: string[];
 } {
-  const calls = ACTION_ORDER.map(
-    (a) => `!(gc-task-state ${deonticByAction[a] ?? "unregulated"})`,
-  ).join("\n");
-  const lines = runMettaLines(TASK_STATE_RELATION + calls + "\n");
-  const output = lines.filter((line) => TASK_STATES.has(line));
+  const db = mettaDB();
+  db.rule(rel("gc-task-state")(S.forbidden), S.blocked);
+  db.rule(rel("gc-task-state")(S.obligated), S.ready);
+  db.rule(rel("gc-task-state")(S.permitted), S.backlog);
+  db.rule(rel("gc-task-state")(S.unregulated), S.backlog);
+
+  const output = ACTION_ORDER.map(
+    (a) => db.evalJs(rel("gc-task-state")(S(deonticByAction[a] ?? "unregulated")))[0] as string,
+  ).filter((s) => TASK_STATES.has(s));
   if (output.length !== ACTION_ORDER.length) {
     throw new Error(`gc-task-state returned ${output.join(",")} for ${ACTION_ORDER.join(",")}`);
   }

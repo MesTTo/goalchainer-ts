@@ -1,32 +1,26 @@
-// Individual vs collective goals as a MetaMo-style consensus on @metta-ts.
-// Ports goal_chainer/motivation.py.
+// Individual vs collective goals as a MetaMo-style consensus on @metta-ts, driven
+// through the typed eDSL. Ports goal_chainer/motivation.py.
 //
-// The original ran MetaMo's consensusAction on PeTTa (and imported a Python
-// helper, so it could not run on a pure-TS runtime). Here the same consensus runs
-// on @metta-ts: each candidate action is an atom carrying its goal correlations
-// and risk; a MeTTa rule folds the individual and collective subsystem scores
-// through the grounded consensus kernel
-//   consensus = (scoreI + scoreC)/2 - 0.25*|scoreI - scoreC|,  score = goals.corr - risk.
-// The disagreement penalty is the principled fairness floor: an action one
-// subsystem loves and the other hates is penalised.
+// Each candidate action carries its goal correlations and risk. The subsystem
+// scores (goals . corr - risk) and the disagreement-penalized consensus
+//   consensus = (scoreI + scoreC)/2 - 0.25*|scoreI - scoreC|
+// are computed on the @metta-ts interpreter. The argmax selections (which action
+// each subsystem prefers, the winner) stay in TypeScript.
 
-import { MeTTa, ValueAtom, type GroundedAtom, type Atom } from "@metta-ts/hyperon";
-import { runMettaLines } from "./runtime.js";
+import { add, sub, mul, div, type Term } from "@metta-ts/edsl";
+import { mettaDB, mabs, num, type MettaDB } from "./engine.js";
 import { roundN } from "./models.js";
 import type { GoalScenario } from "./models.js";
 
 const ENGINE = "MetaMo consensusAction (OpenPsi/MAGUS) on @metta-ts";
-const num = (a: Atom): number => (a as GroundedAtom).jsValue<number>();
 
-// How each action correlates with (preserve_privacy, restore_service, coordinate_team).
 const CORRELATIONS: Record<string, Record<string, number>> = {
   publish_raw_log: { preserve_privacy: -1.0, restore_service: 1.0, coordinate_team: 1.0 },
   publish_redacted_summary: { preserve_privacy: 1.0, restore_service: 0.9, coordinate_team: 0.7 },
   hold_external_update: { preserve_privacy: 1.0, restore_service: 0.0, coordinate_team: 0.0 },
 };
 
-const correlation = (actionId: string, goalId: string): number =>
-  CORRELATIONS[actionId]?.[goalId] ?? 0.0;
+const correlation = (actionId: string, goalId: string): number => CORRELATIONS[actionId]?.[goalId] ?? 0.0;
 
 interface Candidate {
   id: string;
@@ -34,13 +28,24 @@ interface Candidate {
   risk: number;
 }
 
-const dot = (a: number[], b: number[]): number => a.reduce((s, x, i) => s + x * (b[i] ?? 0), 0);
-const score = (goals: number[], c: Candidate, withRisk: boolean): number =>
-  dot(goals, c.corr) - (withRisk ? c.risk : 0);
-const best = (goals: number[], candidates: Candidate[], withRisk: boolean): string =>
-  candidates.reduce((bestC, c) =>
-    score(goals, c, withRisk) > score(goals, bestC, withRisk) ? c : bestC,
-  ).id;
+const dot = (g: number[], c: number[]): Term =>
+  g.reduce<Term>((acc, gi, i) => (i === 0 ? mul(gi, c[i]!) : add(acc, mul(gi, c[i]!))), 0);
+
+const scoreExpr = (goals: number[], c: Candidate, withRisk: boolean): Term =>
+  withRisk ? sub(dot(goals, c.corr), c.risk) : dot(goals, c.corr);
+
+function bestBy(db: MettaDB, goals: number[], candidates: Candidate[], withRisk: boolean): string {
+  let best = candidates[0]!;
+  let bestScore = num(db, scoreExpr(goals, best, withRisk));
+  for (const c of candidates.slice(1)) {
+    const s = num(db, scoreExpr(goals, c, withRisk));
+    if (s > bestScore) {
+      best = c;
+      bestScore = s;
+    }
+  }
+  return best.id;
+}
 
 export interface MotivationResult {
   engine: string;
@@ -53,12 +58,11 @@ export interface MotivationResult {
   consensus: string;
 }
 
-/** Run the individual+collective consensus over the scenario's actions, using
- * each action's PLN strength to derive its risk. */
 export function consensusDecision(
   scenario: GoalScenario,
   strengthByAction: Record<string, number>,
 ): MotivationResult {
+  const db = mettaDB();
   const goals = scenario.goals;
   const individual = goals.map((g) => (g.kind === "individual" ? 1.0 : 0.0));
   const collective = goals.map((g) => (g.kind === "collective" ? 1.0 : 0.0));
@@ -69,40 +73,15 @@ export function consensusDecision(
     risk: roundN(1.0 - strengthByAction[action.id]!, 3),
   }));
 
-  // The consensus kernel closes over the goal vectors; the MeTTa rule supplies
-  // each candidate's correlations and risk.
-  const register = (metta: MeTTa): void => {
-    metta.registerOperation("mm-consensus", (a: Atom[]) => {
-      const corr = [num(a[0]!), num(a[1]!), num(a[2]!)];
-      const risk = num(a[3]!);
-      const sI = dot(individual, corr) - risk;
-      const sC = dot(collective, corr) - risk;
-      return [ValueAtom((sI + sC) / 2 - 0.25 * Math.abs(sI - sC))];
-    });
-  };
-
-  const candLines = candidates.map(
-    (c) => `(cand ${c.id} ${c.corr[0]} ${c.corr[1]} ${c.corr[2]} ${c.risk})`,
-  );
-  const queries = candidates
-    .map(
-      (c) =>
-        `!(match &self (cand ${c.id} $c1 $c2 $c3 $r) (cons ${c.id} (mm-consensus $c1 $c2 $c3 $r)))`,
-    )
-    .join("\n");
-  const program = `${candLines.join("\n")}\n${queries}\n`;
-  const lines = runMettaLines(program, register);
-
   const consensusScores: Record<string, number> = {};
-  for (const line of lines) {
-    const m = line.match(/\(cons (\S+) (-?[0-9.eE+-]+)\)/);
-    if (m) consensusScores[m[1]!] = Number(m[2]);
-  }
   for (const c of candidates) {
-    if (!(c.id in consensusScores)) throw new Error(`MetaMo consensus returned no value for ${c.id}`);
+    const sI = scoreExpr(individual, c, true);
+    const sC = scoreExpr(collective, c, true);
+    // (sI + sC)/2 - 0.25*|sI - sC|
+    consensusScores[c.id] = num(db, sub(div(add(sI, sC), 2), mul(0.25, mabs(sub(sI, sC)))));
   }
-  const chosen = candidates.reduce((bestC, c) =>
-    consensusScores[c.id]! > consensusScores[bestC.id]! ? c : bestC,
+  const chosen = candidates.reduce((best, c) =>
+    consensusScores[c.id]! > consensusScores[best.id]! ? c : best,
   ).id;
 
   return {
@@ -111,19 +90,18 @@ export function consensusDecision(
     collective_goals: collective,
     candidates: candidates.map((c) => ({ id: c.id, corr: c.corr, risk: c.risk })),
     goal_pull: {
-      individual: best(individual, candidates, false),
-      collective: best(collective, candidates, false),
+      individual: bestBy(db, individual, candidates, false),
+      collective: bestBy(db, collective, candidates, false),
     },
     subsystem_preference: {
-      individual: best(individual, candidates, true),
-      collective: best(collective, candidates, true),
+      individual: bestBy(db, individual, candidates, true),
+      collective: bestBy(db, collective, candidates, true),
     },
     consensus_scores: consensusScores,
     consensus: chosen,
   };
 }
 
-/** The compact motivation view both the decision and solve reports carry. */
 export function motivationSummary(m: MotivationResult | null): Record<string, unknown> | null {
   if (m === null) return null;
   return {

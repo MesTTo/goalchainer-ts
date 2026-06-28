@@ -1,21 +1,17 @@
-// Assess a GoalChainer claim with a Subjective-Logic NARS deduction on @metta-ts.
-// Ports goal_chainer/snars_query.py (the derive_incident path).
+// Assess a GoalChainer claim with a Subjective-Logic NARS deduction on @metta-ts,
+// driven through the typed eDSL. Ports goal_chainer/snars_query.py (derive_incident).
 //
-// The original asserted beliefs into the user's SNARS kernel on PeTTa (believe!,
-// ask!, why!). Here the same subjective-logic deduction runs on @metta-ts: each
-// premise is a belief from evidence (9 positive, 0 negative -> opinion via the
-// W=2 non-informative prior), and the two premises chain through a deduction that
-// calls the grounded SL kernels. The numbers are identical to the SNARS run:
-// premise opinions (0.818182, 0, 0.181818, 0.5), derived (0.669421, 0, 0.330579,
-// 0.5), projected expectation 0.834711.
+// Each premise is a belief from evidence (9 positive, 0 negative -> opinion via the
+// W=2 non-informative prior). The two premises chain through a subjective-logic
+// deduction. The opinion arithmetic (the prior mapping, the chained belief, the
+// projected expectation) is computed on the @metta-ts interpreter. The numbers are
+// identical to the SNARS run: premise (0.818182, 0, 0.181818, 0.5), derived
+// (0.669421, 0, 0.330579, 0.5), expectation 0.834711.
 
-import { MeTTa, ValueAtom, type GroundedAtom, type Atom } from "@metta-ts/hyperon";
-import { runMettaLines } from "./runtime.js";
-import { evidenceToOpinion } from "./truth.js";
+import { div, add, sub, mul, type Term } from "@metta-ts/edsl";
+import { mettaDB, num, flt, type MettaDB } from "./engine.js";
 import { extractEvidence } from "./evidence.js";
 import { round6 } from "./models.js";
-
-const num = (a: Atom): number => (a as GroundedAtom).jsValue<number>();
 
 const ENGINE = "SNARS deduction (Subjective-Logic NARS) on @metta-ts";
 
@@ -34,26 +30,16 @@ const roundOpinion = (o: Opinion): Opinion => ({
 });
 
 // Render a float the way Python's repr does (so 0 -> "0.0"), for the why receipt.
-function pyFloat(x: number): string {
-  return Number.isInteger(x) ? x.toFixed(1) : String(x);
+const pyFloat = (x: number): string => (Number.isInteger(x) ? x.toFixed(1) : String(x));
+const opinionStr = (o: Opinion): string =>
+  `(Opinion ${pyFloat(o.b)} ${pyFloat(o.d)} ${pyFloat(o.u)} ${pyFloat(o.a)})`;
+
+/** Map evidence (positive, negative) to an opinion on the engine, W=2 prior. */
+function premiseOpinion(db: MettaDB, wPos: number, wNeg: number): Opinion {
+  const total: Term = add(add(flt(wPos), flt(wNeg)), flt(2));
+  return { b: num(db, div(flt(wPos), total)), d: 0, u: num(db, div(flt(2), total)), a: 0.5 };
 }
 
-function opinionStr(o: Opinion): string {
-  return `(Opinion ${pyFloat(o.b)} ${pyFloat(o.d)} ${pyFloat(o.u)} ${pyFloat(o.a)})`;
-}
-
-// The SL deduction kernels, registered so the MeTTa chain can call them.
-function registerSlOps(metta: MeTTa): void {
-  metta.registerOperation("sl-ded-b", (a: Atom[]) => [ValueAtom(num(a[0]!) * num(a[1]!))]);
-  metta.registerOperation("sl-ded-u", (a: Atom[]) => [ValueAtom(1 - num(a[0]!) * num(a[1]!))]);
-  metta.registerOperation("sl-ded-e", (a: Atom[]) => {
-    const b = num(a[0]!) * num(a[1]!);
-    return [ValueAtom(b + 0.5 * (1 - b))];
-  });
-}
-
-/** Believe `subject is middle` and `middle is conclusion`, run SL forward
- * deduction on @metta-ts, and return the derived opinion + proof. */
 export function derive(
   subject: string,
   middle: string,
@@ -67,23 +53,14 @@ export function derive(
   proof: { rule: string; premises: { statement: string; opinion: Opinion }[] };
   why: string;
 } {
-  const p1 = evidenceToOpinion(9.0, 0.0);
-  const p2 = evidenceToOpinion(9.0, 0.0);
-  // The deduction chains the two premises through the grounded SL kernels.
-  const program = `
-(premise p1 (op ${p1.b} ${p1.u}))
-(premise p2 (op ${p2.b} ${p2.u}))
-(= (derive)
-   (match &self (premise p1 (op $b1 $u1))
-     (match &self (premise p2 (op $b2 $u2))
-       (derived (sl-ded-b $b1 $b2) (sl-ded-u $b1 $b2) (sl-ded-e $b1 $b2)))))
-!(derive)
-`;
-  const lines = runMettaLines(program, registerSlOps);
-  const m = lines.join(" ").match(/\(derived (-?[0-9.eE+-]+) (-?[0-9.eE+-]+) (-?[0-9.eE+-]+)\)/);
-  if (!m) throw new Error(`SNARS deduction returned no result: ${lines.join(" ")}`);
-  const opinion: Opinion = { b: Number(m[1]), d: 0, u: Number(m[2]), a: 0.5 };
-  const expectation = Number(m[3]);
+  const db = mettaDB();
+  const p1 = premiseOpinion(db, 9.0, 0.0);
+  const p2 = premiseOpinion(db, 9.0, 0.0);
+  // Chained deduction (d=0 premises): b = b1*b2, u = 1 - b, expectation = b + 0.5*u.
+  const b = num(db, mul(p1.b, p2.b));
+  const u = num(db, sub(1, b));
+  const expectation = num(db, add(b, mul(0.5, u)));
+  const opinion: Opinion = { b, d: 0, u, a: 0.5 };
 
   const s1 = `${subject} is ${middle}.`;
   const s2 = `${middle} is ${conclusion}.`;
